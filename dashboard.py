@@ -30,19 +30,11 @@ st.title("🏀 NBA Control Center")
 # --- Sidebar Controls ---
 with st.sidebar:
     st.header("⚙️ System Controls")
-    st.write("Fetch yesterday's scores and today's live Net Ratings from the NBA servers.")
+    st.write("Sync your app with your latest Google Sheets and CSV uploads.")
     
-    if st.button("🔄 Update Live Data", type="primary", use_container_width=True):
-        with st.spinner("Syncing schedule and scores..."):
-            try:
-                # Run the schedule updater script (Note: update_ratings.py is no longer needed since Tab 4 pulls live API data)
-                scores_run = subprocess.run(["python", "auto_updater.py"], capture_output=True, text=True)
-                
-                # Clear Streamlit's cache so it is forced to read the fresh numbers
-                st.cache_data.clear()
-                st.success("✅ App memory wiped and ready for new data!")
-            except Exception as e:
-                st.error(f"System error: {e}")
+    if st.button("🔄 Sync Cloud Data", type="primary", use_container_width=True):
+        st.cache_data.clear()
+        st.success("✅ App memory wiped and ready for new data!")
 
 # --- 2. Math Engine ---
 def calc_win_prob(net_diff, pace):
@@ -104,32 +96,29 @@ def run_living_monte_carlo(teams, df_schedule, n_simulations):
 @st.cache_data(ttl=3600)
 def load_team_data():
     try:
-        # 1. Fetch live Net Ratings directly from the NBA
-        stats = leaguedashteamstats.LeagueDashTeamStats(measure_type_detailed_defense='Advanced', season='2025-26')
-        df_nba = stats.get_data_frames()[0]
+        # 1. Fetch Net Ratings from your CSV instead of the blocked API
+        df_nba = pd.read_csv("team_data.csv")
         
-        # 2. Fetch your manual Media Ranks from Google Sheets (Fixed ID)
+        # 2. Fetch your manual Media Ranks live from Google Sheets
         sheet_id = "1MMo_FgfBQdBykFUGjY0ovFxnZPfulx1hX3tGGO06LIQ"
         sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
         df_media = pd.read_csv(sheet_url)
         
         teams = {}
         for index, row in df_nba.iterrows():
-            full_name = row['TEAM_NAME']
-            team = "Trail Blazers" if full_name == "Portland Trail Blazers" else full_name.split(" ")[-1]
+            team = row['Team']
             
-            # Match the NBA data with your Google Sheet
+            # Match the CSV data with your Google Sheet
             sheet_row = df_media[df_media['Team'] == team]
             rank = float(sheet_row['media_rank'].values[0]) if not sheet_row.empty else 15.5
             
-            net, pace = float(row['NET_RATING']), float(row['PACE'])
+            net, pace = float(row['net_rtg']), float(row['pace'])
             media_modifier = (15.5 - rank) * 0.20 
             
             teams[team] = {"net_rtg": net, "pace": pace, "media_rank": rank, "active_net_rtg": (net * 0.80) + media_modifier}
             
         return teams
     except Exception as e:
-        # This will print the actual technical error to your screen instead of hiding it
         st.error(f"Team Data Crash: {e}")
         return None
 
