@@ -5,7 +5,9 @@ import altair as alt
 import subprocess
 from datetime import datetime
 from nba_api.stats.endpoints import scoreboardv3
+from nba_api.stats.endpoints import leaguedashteamstats
 
+# --- Logo Database ---
 logo_map = {
     "Hawks": "atl", "Celtics": "bos", "Nets": "bkn", "Hornets": "cha",
     "Bulls": "chi", "Cavaliers": "cle", "Mavericks": "dal", "Nuggets": "den",
@@ -31,20 +33,14 @@ with st.sidebar:
     st.write("Fetch yesterday's scores and today's live Net Ratings from the NBA servers.")
     
     if st.button("🔄 Update Live Data", type="primary", use_container_width=True):
-        with st.spinner("Downloading from NBA.com..."):
+        with st.spinner("Syncing schedule and scores..."):
             try:
-                # Run both of your background scripts
-                ratings_run = subprocess.run(["python", "update_ratings.py"], capture_output=True, text=True)
-                # Note: We run auto_updater.py here assuming you have it in the same folder for the schedule scores
+                # Run the schedule updater script (Note: update_ratings.py is no longer needed since Tab 4 pulls live API data)
                 scores_run = subprocess.run(["python", "auto_updater.py"], capture_output=True, text=True)
                 
-                if ratings_run.returncode == 0:
-                    # Clear the cache so Streamlit is forced to read the new CSV files
-                    st.cache_data.clear()
-                    st.success("✅ Database successfully updated!")
-                else:
-                    st.error("⚠️ Error pulling data.")
-                    st.code(ratings_run.stderr)
+                # Clear Streamlit's cache so it is forced to read the fresh numbers
+                st.cache_data.clear()
+                st.success("✅ App memory wiped and ready for new data!")
             except Exception as e:
                 st.error(f"System error: {e}")
 
@@ -104,18 +100,45 @@ def run_living_monte_carlo(teams, df_schedule, n_simulations):
     return pd.DataFrame(results).sort_values(by="Projected Wins", ascending=False)
 
 # --- 3. Load Databases ---
-@st.cache_data
+# ttl=3600 tells the app to hold the data for 1 hour before asking the NBA for an update
+@st.cache_data(ttl=3600)
 def load_team_data():
     try:
-        df = pd.read_csv("team_data.csv")
+        # 1. Fetch live Net Ratings directly from the NBA
+        stats = leaguedashteamstats.LeagueDashTeamStats(measure_type_detailed_defense='Advanced', season='2025-26')
+        df_nba = stats.get_data_frames()[0]
+        
+        # 2. Fetch your manual Media Ranks from Google Sheets (Fixed ID)
+        sheet_id = "1MMo_FgfBQdBykFUGjY0ovFxnZPfulx1hX3tGGO06LIQ"
+        sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
+        df_media = pd.read_csv(sheet_url)
+        
         teams = {}
-        for _, row in df.iterrows():
-            team = row['Team']
-            net, pace, rank = float(row['net_rtg']), float(row['pace']), float(row['media_rank'])
+        for index, row in df_nba.iterrows():
+            full_name = row['TEAM_NAME']
+            team = "Trail Blazers" if full_name == "Portland Trail Blazers" else full_name.split(" ")[-1]
+            
+            # Match the NBA data with your Google Sheet
+            sheet_row = df_media[df_media['Team'] == team]
+            rank = float(sheet_row['media_rank'].values[0]) if not sheet_row.empty else 15.5
+            
+            net, pace = float(row['NET_RATING']), float(row['PACE'])
             media_modifier = (15.5 - rank) * 0.20 
+            
             teams[team] = {"net_rtg": net, "pace": pace, "media_rank": rank, "active_net_rtg": (net * 0.80) + media_modifier}
+            
         return teams
-    except:
+    except Exception as e:
+        # This will print the actual technical error to your screen instead of hiding it
+        st.error(f"Team Data Crash: {e}")
+        return None
+
+@st.cache_data
+def load_schedule():
+    try:
+        return pd.read_csv("schedule.csv")
+    except Exception as e:
+        st.error(f"Schedule Crash: {e}")
         return None
 
 @st.cache_data
@@ -125,13 +148,16 @@ def load_schedule():
     except:
         return None
 
+# Actually run the functions to load the data
 teams_data = load_team_data()
 df_schedule = load_schedule()
 
+# Stop the app if the data fails to load
 if not teams_data or df_schedule is None:
-    st.error("Error: Could not find team_data.csv or schedule.csv.")
+    st.error("Error: Could not fetch data from the NBA or Google Sheets.")
     st.stop()
 
+# Create the alphabetical list of teams for the dropdowns
 team_list = sorted(list(teams_data.keys()))
 
 # --- 4. Build the UI Tabs ---
@@ -216,14 +242,11 @@ with tab3:
             
     # If there are saved standings in memory, display the table and the download button
     if 'saved_standings' in st.session_state:
-        # We make a copy for the display so we can inject logos without messing up the CSV download
         display_df = st.session_state['saved_standings'].copy()
         
-        # 1. Add the Logo column
         if "Logo" not in display_df.columns:
             display_df.insert(0, "Logo", display_df["Team"].apply(get_logo_url))
         
-        # 2. Display with ImageColumn configuration
         st.dataframe(
             display_df, 
             use_container_width=True,
@@ -233,9 +256,7 @@ with tab3:
             }
         )
         
-        # Convert the raw dataframe (no logos) to a CSV format in the background
         csv_data = st.session_state['saved_standings'].to_csv(index=False).encode('utf-8')
-        
         st.download_button(
             label="📥 Download Standings as CSV",
             data=csv_data,
@@ -246,81 +267,54 @@ with tab3:
 # TAB 4: DATA MANAGER
 with tab4:
     st.header("Database Manager")
-    st.write("Edit team ratings, pace, and media rankings directly. Click Save to update the model globally.")
+    st.write("Your app now automatically pulls live Net Ratings from the NBA. To edit Media Ranks, use your Google Sheet.")
     
-    try:
-        df_edit = pd.read_csv("team_data.csv")
+    # Paste the exact URL from your browser when you have the Google Sheet open
+    st.link_button("📝 Edit Rankings in Google Sheets", "https://docs.google.com/spreadsheets/d/1MMo_FgfBQdBykFUGjY0ovFxnZPfulx1hX3tGGO06LIQ/edit?gid=0#gid=0")
+    
+    if st.button("🔄 Sync with Cloud Database"):
+        st.cache_data.clear()
+        st.rerun()
         
-        # 1. Automatically sort the table from best to worst Net Rating by default
-        df_edit = df_edit.sort_values("net_rtg", ascending=False)
-        
-        # 2. Add logos for the UI
-        df_edit.insert(0, "Logo", df_edit["Team"].apply(get_logo_url))
-        
-        # 3. Rearrange the columns left-to-right so they look cleaner
-        df_edit = df_edit[["Logo", "Team", "net_rtg", "pace", "media_rank"]]
-        
-        # Add a quick tip to the UI so you remember the headers are clickable
-        st.info("💡 Tip: Click any column header (like 'pace' or 'media_rank') to instantly sort the table!")
-        
-        edited_df = st.data_editor(
-            df_edit, 
-            use_container_width=True, 
-            hide_index=True,
-            column_config={
-                "Logo": st.column_config.ImageColumn("Logo", width="small")
-            }
-        )
-        
-        if st.button("💾 Save Changes to Database", type="primary"):
-            # Drop the Logo column before saving back to the CSV
-            clean_df = edited_df.drop(columns=["Logo"])
-            clean_df.to_csv("team_data.csv", index=False)
-            st.cache_data.clear()
-            st.success("Database updated successfully!")
+    st.divider()
+    st.subheader("📊 Visual Data Explorer")
+    
+    chart_df = pd.DataFrame([{
+        "Team": t, "net_rtg": stats["net_rtg"], "pace": stats["pace"]
+    } for t, stats in teams_data.items()])
+    
+    sort_order = st.radio(
+        "Sort Charts By:",
+        options=["Worst to Best", "Best to Worst", "Alphabetical (By Team)"],
+        horizontal=True
+    )
+    
+    col_chart1, col_chart2 = st.columns(2)
+    
+    with col_chart1:
+        st.markdown("**Base Net Rating**")
+        if sort_order == "Worst to Best":
+            net_df = chart_df.sort_values("net_rtg", ascending=True)
+        elif sort_order == "Best to Worst":
+            net_df = chart_df.sort_values("net_rtg", ascending=False)
+        else:
+            net_df = chart_df.sort_values("Team", ascending=True)
             
-        st.divider()
-        st.subheader("📊 Visual Data Explorer")
+        chart1 = alt.Chart(net_df).mark_bar().encode(
+            x=alt.X('Team', sort=None), y='net_rtg'
+        ).properties(height=400)
+        st.altair_chart(chart1, use_container_width=True)
         
-        sort_order = st.radio(
-            "Sort Charts By:",
-            options=["Worst to Best", "Best to Worst", "Alphabetical (By Team)"],
-            horizontal=True
-        )
-        
-        col_chart1, col_chart2 = st.columns(2)
-        
-        with col_chart1:
-            st.markdown("**Base Net Rating**")
-            if sort_order == "Worst to Best":
-                net_df = edited_df.sort_values("net_rtg", ascending=True)
-            elif sort_order == "Best to Worst":
-                net_df = edited_df.sort_values("net_rtg", ascending=False)
-            else:
-                net_df = edited_df.sort_values("Team", ascending=True)
+    with col_chart2:
+        st.markdown("**Game Pace (Possessions)**")
+        if sort_order == "Worst to Best":
+            pace_df = chart_df.sort_values("pace", ascending=True)
+        elif sort_order == "Best to Worst":
+            pace_df = chart_df.sort_values("pace", ascending=False)
+        else:
+            pace_df = chart_df.sort_values("Team", ascending=True)
             
-            # alt.X(sort=None) forces the chart to respect our Pandas order
-            chart1 = alt.Chart(net_df).mark_bar().encode(
-                x=alt.X('Team', sort=None),
-                y='net_rtg'
-            ).properties(height=400)
-            st.altair_chart(chart1, use_container_width=True)
-            
-        with col_chart2:
-            st.markdown("**Game Pace (Possessions)**")
-            if sort_order == "Worst to Best":
-                pace_df = edited_df.sort_values("pace", ascending=True)
-            elif sort_order == "Best to Worst":
-                pace_df = edited_df.sort_values("pace", ascending=False)
-            else:
-                pace_df = edited_df.sort_values("Team", ascending=True)
-            
-            # scale=alt.Scale(zero=False) zooms the chart in so the small differences in pace are visible
-            chart2 = alt.Chart(pace_df).mark_bar().encode(
-                x=alt.X('Team', sort=None),
-                y=alt.Y('pace', scale=alt.Scale(zero=False)) 
-            ).properties(height=400)
-            st.altair_chart(chart2, use_container_width=True)
-            
-    except FileNotFoundError:
-        st.error("Error: team_data.csv not found.")
+        chart2 = alt.Chart(pace_df).mark_bar().encode(
+            x=alt.X('Team', sort=None), y=alt.Y('pace', scale=alt.Scale(zero=False)) 
+        ).properties(height=400)
+        st.altair_chart(chart2, use_container_width=True)
